@@ -1,0 +1,386 @@
+import type { Script, BlockingEntry, HighlightMark, UserPreferences } from './types';
+import { supabase } from './supabase';
+
+// Default anonymous user ID for non-authenticated mode (valid UUID format)
+const ANONYMOUS_USER_ID = '00000000-0000-0000-0000-000000000001';
+
+// Generate UUID for IDs
+export function generateId(): string {
+  return crypto.randomUUID();
+}
+
+// ============================================================================
+// SCRIPT OPERATIONS
+// ============================================================================
+
+export async function saveScript(script: Script): Promise<void> {
+  const userId = ANONYMOUS_USER_ID;
+
+  // Upload PDF to Supabase Storage
+  let pdfUrl = script.pdf_url;
+
+  if (script.pdf_blob) {
+    const fileName = `${userId}/${script.script_id}.pdf`;
+    const { data, error } = await supabase.storage
+      .from('pdfs')
+      .upload(fileName, script.pdf_blob, {
+        contentType: 'application/pdf',
+        upsert: true,
+      });
+
+    if (error) {
+      console.error('PDF upload error:', error);
+      throw new Error(`Failed to upload PDF: ${error.message}`);
+    }
+
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from('pdfs')
+      .getPublicUrl(fileName);
+
+    pdfUrl = urlData.publicUrl;
+  }
+
+  // Save script metadata to database
+  const { error } = await supabase
+    .from('scripts')
+    .upsert({
+      script_id: script.script_id,
+      user_id: userId,
+      title: script.title,
+      pdf_url: pdfUrl,
+      total_pages: script.total_pages,
+      created_at: script.created_at,
+    });
+
+  if (error) {
+    console.error('Script save error:', error);
+    throw new Error(`Failed to save script: ${error.message}`);
+  }
+}
+
+export async function getScript(scriptId: string): Promise<Script | null> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { data, error } = await supabase
+    .from('scripts')
+    .select('*')
+    .eq('script_id', scriptId)
+    .eq('user_id', userId)
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') return null;
+    console.error('Script fetch error:', error);
+    throw new Error(`Failed to fetch script: ${error.message}`);
+  }
+
+  if (!data) return null;
+
+  // Download PDF blob from storage
+  const fileName = `${userId}/${scriptId}.pdf`;
+  const { data: blobData, error: downloadError } = await supabase.storage
+    .from('pdfs')
+    .download(fileName);
+
+  if (downloadError) {
+    console.error('PDF download error:', downloadError);
+    throw new Error(`Failed to download PDF: ${downloadError.message}`);
+  }
+
+  return {
+    script_id: data.script_id,
+    title: data.title,
+    pdf_url: data.pdf_url,
+    pdf_blob: blobData,
+    total_pages: data.total_pages,
+    created_at: data.created_at,
+  };
+}
+
+export async function getAllScripts(): Promise<Script[]> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { data, error } = await supabase
+    .from('scripts')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Scripts fetch error:', error);
+    throw new Error(`Failed to fetch scripts: ${error.message}`);
+  }
+
+  return (data || []).map(row => ({
+    script_id: row.script_id,
+    title: row.title,
+    pdf_url: row.pdf_url,
+    pdf_blob: new Blob(),
+    total_pages: row.total_pages,
+    created_at: row.created_at,
+  }));
+}
+
+export async function deleteScript(scriptId: string): Promise<void> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const fileName = `${userId}/${scriptId}.pdf`;
+  const { error: storageError } = await supabase.storage
+    .from('pdfs')
+    .remove([fileName]);
+
+  if (storageError) {
+    console.error('PDF delete error:', storageError);
+  }
+
+  const { error } = await supabase
+    .from('scripts')
+    .delete()
+    .eq('script_id', scriptId)
+    .eq('user_id', userId);
+
+  if (error) {
+    console.error('Script delete error:', error);
+    throw new Error(`Failed to delete script: ${error.message}`);
+  }
+}
+
+// ============================================================================
+// BLOCKING ENTRY OPERATIONS
+// ============================================================================
+
+export async function saveBlockingEntry(entry: BlockingEntry): Promise<void> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { error } = await supabase
+    .from('blocking_entries')
+    .upsert({
+      entry_id: entry.entry_id,
+      script_id: entry.script_id,
+      user_id: userId,
+      page_number: entry.page_number,
+      index_number: entry.index_number,
+      selection_type: entry.selection_type,
+      selection_text: entry.selection_text,
+      selection_box: entry.selection_box,
+      blocking_text: entry.blocking_text,
+      annotation_type: entry.annotation_type,
+      color: entry.color,
+      created_at: entry.created_at,
+      updated_at: entry.updated_at,
+    });
+
+  if (error) {
+    console.error('Entry save error:', error);
+    throw new Error(`Failed to save entry: ${error.message}`);
+  }
+}
+
+export async function getBlockingEntry(entryId: string): Promise<BlockingEntry | null> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { data, error } = await supabase
+    .from('blocking_entries')
+    .select('*')
+    .eq('entry_id', entryId)
+    .eq('user_id', userId)
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') return null;
+    console.error('Entry fetch error:', error);
+    throw new Error(`Failed to fetch entry: ${error.message}`);
+  }
+
+  return data as BlockingEntry;
+}
+
+export async function getEntriesForScript(scriptId: string): Promise<BlockingEntry[]> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { data, error } = await supabase
+    .from('blocking_entries')
+    .select('*')
+    .eq('script_id', scriptId)
+    .eq('user_id', userId)
+    .order('page_number', { ascending: true })
+    .order('index_number', { ascending: true });
+
+  if (error) {
+    console.error('Entries fetch error:', error);
+    throw new Error(`Failed to fetch entries: ${error.message}`);
+  }
+
+  return data as BlockingEntry[];
+}
+
+export async function getEntriesForPage(scriptId: string, pageNumber: number): Promise<BlockingEntry[]> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { data, error } = await supabase
+    .from('blocking_entries')
+    .select('*')
+    .eq('script_id', scriptId)
+    .eq('page_number', pageNumber)
+    .eq('user_id', userId)
+    .order('index_number', { ascending: true });
+
+  if (error) {
+    console.error('Entries fetch error:', error);
+    throw new Error(`Failed to fetch entries: ${error.message}`);
+  }
+
+  return data as BlockingEntry[];
+}
+
+export async function deleteBlockingEntry(entryId: string): Promise<void> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { error } = await supabase
+    .from('blocking_entries')
+    .delete()
+    .eq('entry_id', entryId)
+    .eq('user_id', userId);
+
+  if (error) {
+    console.error('Entry delete error:', error);
+    throw new Error(`Failed to delete entry: ${error.message}`);
+  }
+}
+
+// ============================================================================
+// HIGHLIGHT MARK OPERATIONS
+// ============================================================================
+
+export async function saveHighlightMark(mark: HighlightMark): Promise<void> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { error } = await supabase
+    .from('highlight_marks')
+    .upsert({
+      mark_id: mark.mark_id,
+      script_id: mark.script_id,
+      user_id: userId,
+      page_number: mark.page_number,
+      path_data: mark.path_data,
+      color: mark.color,
+      thickness: mark.thickness,
+      opacity: mark.opacity,
+      created_at: mark.created_at,
+    });
+
+  if (error) {
+    console.error('Highlight save error:', error);
+    throw new Error(`Failed to save highlight: ${error.message}`);
+  }
+}
+
+export async function getHighlightsForPage(scriptId: string, pageNumber: number): Promise<HighlightMark[]> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { data, error } = await supabase
+    .from('highlight_marks')
+    .select('*')
+    .eq('script_id', scriptId)
+    .eq('page_number', pageNumber)
+    .eq('user_id', userId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.error('Highlights fetch error:', error);
+    throw new Error(`Failed to fetch highlights: ${error.message}`);
+  }
+
+  return data as HighlightMark[];
+}
+
+export async function deleteHighlightMark(markId: string): Promise<void> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { error } = await supabase
+    .from('highlight_marks')
+    .delete()
+    .eq('mark_id', markId)
+    .eq('user_id', userId);
+
+  if (error) {
+    console.error('Highlight delete error:', error);
+    throw new Error(`Failed to delete highlight: ${error.message}`);
+  }
+}
+
+export async function deleteHighlightsForScript(scriptId: string): Promise<void> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { error } = await supabase
+    .from('highlight_marks')
+    .delete()
+    .eq('script_id', scriptId)
+    .eq('user_id', userId);
+
+  if (error) {
+    console.error('Highlights delete error:', error);
+    throw new Error(`Failed to delete highlights: ${error.message}`);
+  }
+}
+
+// ============================================================================
+// USER PREFERENCES OPERATIONS
+// ============================================================================
+
+export async function getUserPreferences(): Promise<UserPreferences> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { data, error } = await supabase
+    .from('user_preferences')
+    .select('*')
+    .eq('user_id', userId)
+    .single();
+
+  if (error && error.code !== 'PGRST116') {
+    console.error('Preferences fetch error:', error);
+    throw new Error(`Failed to fetch preferences: ${error.message}`);
+  }
+
+  if (!data) {
+    return {
+      user_id: userId,
+      pdf_zoom_level: 1.5,
+      highlight_preset_name: 'Yellow',
+      highlight_color: '#FFF59D',
+      highlight_opacity: 0.5,
+      highlight_thickness: 8,
+      info_banner_dismissed: false,
+      panel_width: 33,
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  return data as UserPreferences;
+}
+
+export async function saveUserPreferences(preferences: Partial<UserPreferences>): Promise<void> {
+  const userId = ANONYMOUS_USER_ID;
+
+  const { error } = await supabase
+    .from('user_preferences')
+    .upsert({
+      user_id: userId,
+      ...preferences,
+      updated_at: new Date().toISOString(),
+    });
+
+  if (error) {
+    console.error('Preferences save error:', error);
+    throw new Error(`Failed to save preferences: ${error.message}`);
+  }
+}
+
+// ============================================================================
+// INITIALIZATION (No-op for Supabase - cloud is always ready)
+// ============================================================================
+
+export async function initDB(): Promise<void> {
+  return Promise.resolve();
+}
